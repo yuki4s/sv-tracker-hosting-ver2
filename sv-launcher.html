@@ -99,8 +99,12 @@ function getMergedQuery() {
 
   // 2) LIFF 初期化・ログイン
   $("#status").textContent = "LIFF 初期化中…";
+  // sv-launcher.html の main() 内 2) LIFF 初期化・ログインの後
   await liff.init({ liffId: LIFF_ID });
   if (!liff.isLoggedIn()) { liff.login(); return; }
+
+  const prof = await liff.getProfile();           // { userId, displayName, pictureUrl }
+  const lineUserId = prof.userId || "";
 
   // 3) Token_API へ mint（idToken は必須）
   $("#status").textContent = "フォームの準備中…";
@@ -115,6 +119,7 @@ function getMergedQuery() {
   const body = new URLSearchParams({
     action: "mint",
     idToken,
+    lineUserId,        // ★ 追加：既存行と確実にマージさせる
     form,                 // "sv"
     mealType: meal        // breakfast|lunch|snack|dinner
   });
