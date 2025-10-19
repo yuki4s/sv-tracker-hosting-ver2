@@ -1,0 +1,161 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SV Form Launcher (LIFF)</title>
+<script src="https://static.line-scdn.net/liff/edge/2/sdk.js"></script>
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; margin:0; padding:16px; line-height:1.6; }
+  h1 { font-size:18px; margin:0 0 12px; }
+  .card { border:1px solid #e5e5e5; border-radius:12px; padding:14px; }
+  .muted { color:#666; font-size:13px; }
+  .ok { color:#0a7; }
+  .err { color:#b00020; white-space:pre-wrap; }
+  .btn { margin-top:12px; display:inline-block; padding:12px 16px; border-radius:10px; border:none; background:#111; color:#fff; font-weight:600; }
+  .btn:disabled { opacity:.5; }
+  code { background:#f6f6f6; padding:1px 5px; border-radius:4px; }
+</style>
+<body>
+  <h1>SV Form Launcher</h1>
+  <div class="card">
+    <div id="status" class="muted">初期化中…</div>
+    <div id="hint" class="muted" style="margin-top:6px"></div>
+    <div id="actions" style="margin-top:10px"></div>
+    <div id="error" class="err" style="margin-top:10px"></div>
+  </div>
+
+<script>
+/** ====== 環境定数 ====== */
+const LIFF_ID = "2008316994-7xXn4R4l"; // 共有済み LIFF ID（openid スコープ必須）
+const GAS_API = "https://script.google.com/macros/s/AKfycbzljCsKt_7hRuWKP3QKq4ASLU6BDxWW1z_TwF2uDdYdy0xHVLFxqLSJqEvDGZwH_YQ/exec"; // Token_API WebApps
+
+/** 表示ラベル（Token_API と一致） */
+const MEAL_LABELS = { breakfast:"朝食", lunch:"昼食", dinner:"夕食", snack:"間食" };
+
+/** ====== DOMユーティリティ ====== */
+const $ = s => document.querySelector(s);
+
+/** ====== JSTユーティリティ ====== */
+function nowJST() { return new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Tokyo" })); }
+function fmt(date, pat) {
+  const z = v => String(v).padStart(2,"0");
+  const y = date.getFullYear(), m = z(date.getMonth()+1), d = z(date.getDate());
+  const H = z(date.getHours()), M = z(date.getMinutes());
+  if (pat === "yyyy-MM-dd") return `${y}-${m}-${d}`;
+  if (pat === "HH:mm") return `${H}:${M}`;
+  return date.toISOString();
+}
+
+/** ====== クエリ取得（LIFFユニバーサルリンク対策） ======
+ * 1) 通常: location.search に form/meal がある
+ * 2) liff.line.me からの起動: location.search の liff.state 内に本来のクエリが入る
+ * 3) さらに hash 内に入る環境もあるので最低限のフォールバックも用意
+ */
+function getMergedQuery() {
+  // 直の search を見る
+  const url = new URL(location.href);
+  let sp = new URLSearchParams(url.search);
+
+  // form が無い → liff.state を展開
+  if (!sp.get("form")) {
+    const state = sp.get("liff.state");
+    if (state) {
+      try {
+        // state は "/sv-launcher.html?form=sv&meal=..." のような文字列
+        const stUrl = new URL(state, location.origin);
+        sp = new URLSearchParams(stUrl.search);
+      } catch(_) {
+        // 先頭に "/" がないケースのフォールバック
+        const pseudo = state.startsWith("?") ? state : ("?"+state);
+        sp = new URLSearchParams(pseudo);
+      }
+    }
+  }
+
+  // それでも無ければ hash を見る（万一のフォールバック）
+  if (!sp.get("form") && location.hash) {
+    const h = location.hash.replace(/^#/, "");
+    if (h.includes("=")) {
+      sp = new URLSearchParams(h);
+    }
+  }
+  return sp;
+}
+
+/** ====== メイン ====== */
+(async function main(){
+  // 1) クエリ検証（liff.state 含めて解釈）
+  const qs = getMergedQuery();
+  const form = (qs.get("form") || "sv").toLowerCase();   // 既定は sv
+  const meal = (qs.get("meal") || "").toLowerCase();     // breakfast|lunch|snack|dinner
+  const date = (qs.get("date") || "");                   // 例: 2025-01-01
+  const time = (qs.get("time") || "");                   // 例: 07:30
+
+  if (form !== "sv" || !["breakfast","lunch","snack","dinner"].includes(meal)) {
+    $("#status").textContent = "このページはリッチメニューのボタンから起動してください。";
+    $("#hint").innerHTML = '例) <code>?form=sv&meal=breakfast</code> / <code>?form=sv&meal=dinner&date=2025-01-01</code>';
+    return;
+  }
+
+  // 2) LIFF 初期化・ログイン
+  $("#status").textContent = "LIFF 初期化中…";
+  await liff.init({ liffId: LIFF_ID });
+  if (!liff.isLoggedIn()) { liff.login(); return; }
+
+  // 3) Token_API へ mint（idToken は必須）
+  $("#status").textContent = "フォームの準備中…";
+  const idToken = liff.getIDToken();
+  if (!idToken) {
+    $("#error").textContent = "idToken を取得できませんでした。LIFF のスコープに openid を付与してください。";
+    $("#status").textContent = "エラー";
+    return;
+  }
+
+  // 付与するパラメータ（ateDate/ateTime は任意。指定がなければ Token_API 側で「今」を使用）
+  const body = new URLSearchParams({
+    action: "mint",
+    idToken,
+    form,                 // "sv"
+    mealType: meal        // breakfast|lunch|snack|dinner
+  });
+  if (date) body.append("ateDate", date);
+  if (time) body.append("ateTime", time);
+
+  let prefillUrl = "";
+  try {
+    const res = await fetch(GAS_API, {
+      method: "POST",
+      headers: { "Content-Type":"application/x-www-form-urlencoded" },
+      body
+    });
+    const j = await res.json();
+    if (!j || !j.ok || !j.prefillUrl) throw new Error(j && j.error || "Token_API error");
+    prefillUrl = j.prefillUrl;
+  } catch (err) {
+    $("#error").textContent = String(err && err.message || err);
+    $("#status").textContent = "エラー";
+    return;
+  }
+
+  // 4) ユーザ案内＋遷移
+  const mealJp = MEAL_LABELS[meal] || meal;
+  const whenStr = date ? `${date}` : fmt(nowJST(), "yyyy-MM-dd");
+  $("#status").innerHTML = `<span class="ok">準備完了</span>：${whenStr} の「${mealJp}」フォームを開きます。`;
+  $("#hint").textContent = (meal === "dinner")
+    ? "※ 自己申告の食事バランスガイドスコアは夕食で入力／確認してください。"
+    : "※ 朝/昼/間は自己申告スコアの入力は不要です。";
+
+  const btn = document.createElement("button");
+  btn.className = "btn";
+  btn.textContent = "フォームを開く";
+  btn.onclick = () => location.href = prefillUrl;
+  $("#actions").appendChild(btn);
+
+  // 自動で遷移（1.2秒後）
+  setTimeout(()=> location.href = prefillUrl, 1200);
+})().catch(err => {
+  $("#error").textContent = String(err && err.stack || err);
+  $("#status").textContent = "エラー";
+});
+</script>
+</body>
